@@ -254,15 +254,18 @@
     outputLabel: $("outputLabel"),
     translateBtn: $("translateBtn"),
     micBtn: $("micBtn"),
+    micBtnMain: $("micBtnMain"),
     cameraBtn: $("cameraBtn"),
     imageInput: $("imageInput"),
     clearBtn: $("clearBtn"),
     speakBtn: $("speakBtn"),
+    speakBtnMain: $("speakBtnMain"),
     copyBtn: $("copyBtn"),
     charCount: $("charCount"),
     micStatus: $("micStatus"),
     ocrStatus: $("ocrStatus"),
     speakStatus: $("speakStatus"),
+    voiceHint: $("voiceHint"),
     demoNote: $("demoNote"),
     historyList: $("historyList"),
     clearHistoryBtn: $("clearHistoryBtn"),
@@ -274,6 +277,9 @@
   let recognition = null;
   let tesseractLoading = null;
   let voicesCache = [];
+  let voicesReady = false;
+  let speechUnlocked = false;
+  let speakResumeTimer = null;
 
   const TRANSLATE_BTN_HTML =
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 8l6 6M5 8l6-6M5 8h10a4 4 0 0 1 0 8h-2"/><path d="M13 16l6 6M19 16l-6 6"/></svg> Translate';
@@ -719,6 +725,79 @@
     return SR || null;
   }
 
+  function isMicSupported() {
+    return !!(getSpeechRecognition() && window.isSecureContext);
+  }
+
+  function micUnsupportedReason() {
+    if (!window.isSecureContext) {
+      return "Mic needs a secure page (HTTPS or localhost). Open the live site over HTTPS.";
+    }
+    if (!getSpeechRecognition()) {
+      return "Voice input (dictation) is not supported in this browser. On iPhone, Safari/Chrome/Brave share WebKit and usually lack SpeechRecognition — type instead, or use Chrome/Edge on Android or desktop.";
+    }
+    return "";
+  }
+
+  function setMicListeningUI(on) {
+    const method = on ? "add" : "remove";
+    els.micBtn.classList[method]("listening");
+    if (els.micBtnMain) els.micBtnMain.classList[method]("listening");
+    if (on) els.micStatus.classList.remove("hidden");
+    else els.micStatus.classList.add("hidden");
+  }
+
+  function setSpeakSpeakingUI(on) {
+    const method = on ? "add" : "remove";
+    els.speakBtn.classList[method]("speaking");
+    if (els.speakBtnMain) els.speakBtnMain.classList[method]("speaking");
+    if (on) els.speakStatus.classList.remove("hidden");
+    else els.speakStatus.classList.add("hidden");
+  }
+
+  function updateVoiceCapabilityUI() {
+    const reason = micUnsupportedReason();
+    const unsupported = !!reason;
+    [els.micBtn, els.micBtnMain].forEach((btn) => {
+      if (!btn) return;
+      btn.classList.toggle("unsupported", unsupported);
+      btn.title = unsupported
+        ? "Mic — not supported on this browser"
+        : "Mic — speak to type (tap once; allow microphone)";
+    });
+    if (els.voiceHint) {
+      if (unsupported) {
+        els.voiceHint.textContent = reason;
+        els.voiceHint.classList.remove("hidden", "info");
+      } else {
+        els.voiceHint.classList.add("hidden");
+        els.voiceHint.textContent = "";
+      }
+    }
+    const ttsOk = typeof window.speechSynthesis !== "undefined";
+    [els.speakBtn, els.speakBtnMain].forEach((btn) => {
+      if (!btn) return;
+      btn.classList.toggle("unsupported", !ttsOk);
+      btn.title = ttsOk
+        ? "Speak — hear translation aloud"
+        : "Speak — speech synthesis unavailable";
+    });
+  }
+
+  function unlockSpeech() {
+    if (speechUnlocked || typeof window.speechSynthesis === "undefined") return;
+    speechUnlocked = true;
+    try {
+      const warm = new SpeechSynthesisUtterance(" ");
+      warm.volume = 0;
+      warm.rate = 1;
+      window.speechSynthesis.speak(warm);
+      window.speechSynthesis.cancel();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
   function stopMic() {
     if (recognition) {
       try {
@@ -731,23 +810,27 @@
       }
       recognition = null;
     }
-    els.micBtn.classList.remove("listening");
-    els.micStatus.classList.add("hidden");
+    setMicListeningUI(false);
   }
 
   function startMic() {
+    // Must run from a direct user tap/click (gesture).
+    unlockSpeech();
+
     if (recognition) {
       stopMic();
       showToast("Mic stopped");
       return;
     }
 
-    const SR = getSpeechRecognition();
-    if (!SR) {
-      showToast("Voice input not supported in this browser — try Chrome/Edge");
+    const reason = micUnsupportedReason();
+    if (reason) {
+      updateVoiceCapabilityUI();
+      showToast("Mic not supported here — see tip above", 4200);
       return;
     }
 
+    const SR = getSpeechRecognition();
     const rec = new SR();
     recognition = rec;
     rec.lang = STT_LANG[state.source] || "en-US";
@@ -755,10 +838,9 @@
     rec.continuous = false;
     rec.maxAlternatives = 1;
 
-    els.micBtn.classList.add("listening");
-    els.micStatus.classList.remove("hidden");
+    setMicListeningUI(true);
     els.micStatus.querySelector("span:last-child").textContent =
-      "Listening… (" + rec.lang + ")";
+      "Listening… (" + rec.lang + ") — tap Mic again to stop";
 
     rec.onresult = (event) => {
       let finalText = "";
@@ -779,11 +861,22 @@
     rec.onerror = (event) => {
       stopMic();
       const err = event.error || "error";
-      if (err === "not-allowed") showToast("Microphone permission denied");
-      else if (err === "no-speech") showToast("No speech detected");
-      else if (err === "language-not-supported") {
-        showToast("Browser may not support " + (STT_LANG[state.source] || state.source) + " — try en-US");
-      } else showToast("Mic error: " + err);
+      if (err === "not-allowed" || err === "service-not-allowed") {
+        showToast("Microphone permission denied — allow mic in browser settings", 4200);
+      } else if (err === "no-speech") {
+        showToast("No speech detected — tap Mic and try again");
+      } else if (err === "aborted") {
+        /* user/system abort — quiet */
+      } else if (err === "language-not-supported") {
+        showToast(
+          "Browser may not support " + (STT_LANG[state.source] || state.source) + " — try English source",
+          4000
+        );
+      } else if (err === "network") {
+        showToast("Speech recognition needs network on this device", 3500);
+      } else {
+        showToast("Mic error: " + err);
+      }
     };
 
     rec.onend = () => {
@@ -794,73 +887,83 @@
       rec.start();
     } catch (e) {
       stopMic();
-      showToast("Could not start microphone");
+      showToast("Could not start microphone — try again with a tap");
     }
-  }
-
-  function loadTesseract() {
-    if (window.Tesseract) return Promise.resolve(window.Tesseract);
-    if (tesseractLoading) return tesseractLoading;
-    tesseractLoading = new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
-      s.async = true;
-      s.onload = () => {
-        if (window.Tesseract) resolve(window.Tesseract);
-        else reject(new Error("Tesseract failed to load"));
-      };
-      s.onerror = () => reject(new Error("Could not load Tesseract.js (CDN)"));
-      document.head.appendChild(s);
-    });
-    return tesseractLoading;
-  }
-
-  function startCamera() {
-    els.imageInput.click();
-  }
-
-  async function onImagePicked(e) {
-    const file = e.target.files && e.target.files[0];
-    els.imageInput.value = "";
-    if (!file) return;
-
-    const name = file.name || "photo.jpg";
-    const ocrCode = OCR_LANG[state.source] || "eng";
-    els.ocrStatus.classList.remove("hidden");
-    els.ocrStatus.textContent = "OCR · loading engine for " + ocrCode + "…";
-
-    try {
-      const Tesseract = await loadTesseract();
-      els.ocrStatus.textContent = "OCR · reading " + name + " (" + ocrCode + ")…";
-      const result = await Tesseract.recognize(file, ocrCode, {
-        logger: (m) => {
-          if (m.status === "recognizing text" && typeof m.progress === "number") {
-            els.ocrStatus.textContent =
-              "OCR · " + Math.round(m.progress * 100) + "% · " + name;
-          }
-        },
-      });
-      const text = (result && result.data && result.data.text ? result.data.text : "").trim();
-      if (!text) {
-        els.ocrStatus.textContent = "OCR · no text found in " + name;
-        showToast("No text detected in image");
-      } else {
-        els.inputText.value = text;
-        updateCharCount();
-        applyScriptClass(els.inputText, state.source);
-        els.ocrStatus.textContent = "OCR · done · " + name;
-        showToast("OCR text inserted");
-      }
-    } catch (err) {
-      els.ocrStatus.textContent = "OCR failed";
-      showToast((err && err.message) || "OCR failed", 4000);
-    }
-    setTimeout(() => els.ocrStatus.classList.add("hidden"), 2800);
   }
 
   function refreshVoices() {
     if (typeof window.speechSynthesis === "undefined") return;
-    voicesCache = window.speechSynthesis.getVoices() || [];
+    const list = window.speechSynthesis.getVoices() || [];
+    if (list.length) {
+      voicesCache = list;
+      voicesReady = true;
+    }
+  }
+
+  function waitForVoices(maxMs) {
+    refreshVoices();
+    if (voicesCache.length) return Promise.resolve(voicesCache);
+    if (typeof window.speechSynthesis === "undefined") return Promise.resolve([]);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        refreshVoices();
+        resolve(voicesCache);
+      };
+      const onChange = () => finish();
+      try {
+        window.speechSynthesis.addEventListener("voiceschanged", onChange, { once: true });
+      } catch (_) {
+        window.speechSynthesis.onvoiceschanged = () => {
+          onChange();
+        };
+      }
+      let n = 0;
+      const poll = setInterval(() => {
+        refreshVoices();
+        n += 1;
+        if (voicesCache.length || n > 40) {
+          clearInterval(poll);
+          finish();
+        }
+      }, 50);
+      setTimeout(() => {
+        clearInterval(poll);
+        finish();
+      }, maxMs || 1200);
+    });
+  }
+
+  function scoreVoice(voice, want, primary) {
+    const lang = (voice.lang || "").toLowerCase();
+    let score = 0;
+    if (lang === want) score += 100;
+    else if (lang.indexOf(primary + "-") === 0 || lang === primary) score += 60;
+    else if (lang.indexOf(primary) === 0) score += 40;
+    // Prefer local / default / quality names lightly
+    if (voice.localService) score += 8;
+    if (voice.default) score += 4;
+    const name = (voice.name || "").toLowerCase();
+    if (/premium|enhanced|neural|natural|google|microsoft|siri/.test(name)) score += 6;
+    // Egyptian Arabic: prefer EG / XA / SA over random ar
+    if (want === "ar-eg") {
+      if (/ar-eg/.test(lang)) score += 30;
+      else if (/ar-xa|ar-sa|ar-ae/.test(lang)) score += 12;
+      if (/egypt|egyptian|nassim|maged|hala/.test(name)) score += 10;
+    }
+    if (want === "ja-jp" && /ja/.test(lang)) {
+      if (/kyoko|otoya|google|haruka/.test(name)) score += 6;
+    }
+    if (want === "es-es" && /es/.test(lang)) {
+      if (/es-es|es-mx|es-us/.test(lang)) score += 8;
+    }
+    if (want === "gl-es") {
+      if (/gl/.test(lang)) score += 40;
+      else if (/es/.test(lang)) score += 20;
+    }
+    return score;
   }
 
   function pickVoice(bcp47) {
@@ -868,30 +971,86 @@
     if (!voicesCache.length) return null;
     const want = (bcp47 || "").toLowerCase();
     const primary = want.split("-")[0];
-    // Exact lang match
-    let v = voicesCache.find((x) => (x.lang || "").toLowerCase() === want);
-    if (v) return v;
-    // Prefix match (ar-EG → ar-SA / ar-XA / ar)
-    v = voicesCache.find((x) => (x.lang || "").toLowerCase().indexOf(primary) === 0);
-    if (v) return v;
-    // Galician fallback → Spanish
-    if (primary === "gl") {
-      v = voicesCache.find((x) => (x.lang || "").toLowerCase().indexOf("es") === 0);
-      if (v) return v;
+    let best = null;
+    let bestScore = 0;
+    for (let i = 0; i < voicesCache.length; i++) {
+      const v = voicesCache[i];
+      const s = scoreVoice(v, want, primary);
+      // Galician fallback: allow Spanish
+      let effective = s;
+      if (primary === "gl" && s === 0) {
+        const lang = (v.lang || "").toLowerCase();
+        if (lang.indexOf("es") === 0) effective = 15;
+      }
+      // Arabic: any ar*
+      if ((want === "ar-eg" || primary === "ar") && effective === 0) {
+        if (/ar/i.test(v.lang || "")) effective = 10;
+      }
+      if (effective > bestScore) {
+        bestScore = effective;
+        best = v;
+      }
     }
-    // Egyptian Arabic: prefer any Arabic voice
-    if (want === "ar-eg" || primary === "ar") {
-      v = voicesCache.find((x) => /ar/i.test(x.lang || ""));
-      if (v) return v;
+    return bestScore > 0 ? best : null;
+  }
+
+  function clearSpeakResume() {
+    if (speakResumeTimer) {
+      clearInterval(speakResumeTimer);
+      speakResumeTimer = null;
     }
-    return null;
+  }
+
+  function kickSpeechSynthesis() {
+    // Chrome (esp. Android) often leaves synthesis paused after speak().
+    try {
+      if (window.speechSynthesis.paused) window.speechSynthesis.resume();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function finishSpeakingUI() {
+    clearSpeakResume();
+    setSpeakSpeakingUI(false);
+  }
+
+  function speakUtterance(text, bcp) {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = bcp;
+    u.rate = state.target === "ja" ? 0.9 : 0.95;
+    const voice = pickVoice(bcp);
+    if (voice) {
+      u.voice = voice;
+      u.lang = voice.lang || bcp;
+    }
+    setSpeakSpeakingUI(true);
+    u.onend = () => finishSpeakingUI();
+    u.onerror = () => {
+      finishSpeakingUI();
+      showToast("Could not speak on this device");
+    };
+    window.speechSynthesis.speak(u);
+    kickSpeechSynthesis();
+    clearSpeakResume();
+    let ticks = 0;
+    speakResumeTimer = setInterval(() => {
+      ticks += 1;
+      kickSpeechSynthesis();
+      if (!window.speechSynthesis.speaking && !window.speechSynthesis.pending) {
+        finishSpeakingUI();
+      }
+      if (ticks > 80) clearSpeakResume();
+    }, 250);
+    return voice;
   }
 
   function speakOutput() {
+    unlockSpeech();
     const hasResult = els.outputText.classList.contains("has-result");
     const text = hasResult ? els.outputText.textContent.trim() : "";
     if (!text) {
-      showToast("Translate something first");
+      showToast("Translate something first, then tap Speak");
       return;
     }
 
@@ -901,36 +1060,57 @@
     }
 
     const bcp = LANGS[state.target].tts || "en-US";
+
+    // Cancel any prior utterance, then speak inside this user gesture.
     try {
       window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = bcp;
-      u.rate = state.target === "ja" ? 0.9 : 0.95;
-      const voice = pickVoice(bcp);
-      if (voice) {
-        u.voice = voice;
-        u.lang = voice.lang || bcp;
-      }
-      els.speakBtn.classList.add("speaking");
-      els.speakStatus.classList.remove("hidden");
-      u.onend = u.onerror = () => {
-        els.speakBtn.classList.remove("speaking");
-        els.speakStatus.classList.add("hidden");
-      };
-      window.speechSynthesis.speak(u);
-      if (!voice && (state.target === "ar-EG" || state.target === "gl")) {
-        showToast(
-          state.target === "gl"
-            ? "No Galician voice — using best available (often Spanish)"
-            : "No ar-EG voice — using best Arabic/default voice available",
-          3500
-        );
-      }
+      clearSpeakResume();
     } catch (_) {
-      els.speakBtn.classList.remove("speaking");
-      els.speakStatus.classList.add("hidden");
-      showToast("Could not speak this language on this device");
+      /* ignore */
     }
+
+    refreshVoices();
+
+    const run = (voiceHint) => {
+      try {
+        const voice = speakUtterance(text, bcp);
+        if (!voice && (state.target === "ar-EG" || state.target === "gl" || state.target === "ja")) {
+          showToast(
+            state.target === "gl"
+              ? "No Galician voice — using Spanish/default if available"
+              : state.target === "ja"
+                ? "No Japanese voice found — using device default"
+                : "No ar-EG voice — using best Arabic/default voice",
+            3500
+          );
+        } else if (voiceHint) {
+          /* voices loaded late — silent */
+        }
+      } catch (_) {
+        finishSpeakingUI();
+        showToast("Could not speak this language on this device");
+      }
+    };
+
+    if (voicesCache.length) {
+      run(false);
+      return;
+    }
+
+    // Speak immediately with lang (keeps iOS user-gesture), then retry once voices arrive.
+    run(false);
+    waitForVoices(1500).then((list) => {
+      if (!list.length) return;
+      if (!els.speakBtn.classList.contains("speaking") && !(els.speakBtnMain && els.speakBtnMain.classList.contains("speaking"))) {
+        // First speak may have ended instantly with no voice; try again with a loaded voice.
+        try {
+          window.speechSynthesis.cancel();
+          speakUtterance(text, bcp);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    });
   }
 
   function copyOutput() {
@@ -970,9 +1150,11 @@
     els.translateBtn.addEventListener("click", doTranslate);
     els.swapBtn.addEventListener("click", swapLanguages);
     els.micBtn.addEventListener("click", startMic);
+    if (els.micBtnMain) els.micBtnMain.addEventListener("click", startMic);
     els.cameraBtn.addEventListener("click", startCamera);
     els.imageInput.addEventListener("change", onImagePicked);
     els.speakBtn.addEventListener("click", speakOutput);
+    if (els.speakBtnMain) els.speakBtnMain.addEventListener("click", speakOutput);
     els.copyBtn.addEventListener("click", copyOutput);
     els.clearBtn.addEventListener("click", () => {
       els.inputText.value = "";
@@ -1020,8 +1202,14 @@
     });
     if (typeof window.speechSynthesis !== "undefined") {
       refreshVoices();
-      window.speechSynthesis.onvoiceschanged = refreshVoices;
+      try {
+        window.speechSynthesis.addEventListener("voiceschanged", refreshVoices);
+      } catch (_) {
+        window.speechSynthesis.onvoiceschanged = refreshVoices;
+      }
+      waitForVoices(2500);
     }
+    updateVoiceCapabilityUI();
   }
 
   function init() {

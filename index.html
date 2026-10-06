@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Noto+Sans+Arabic:wght@400;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=say2" />
+  <link rel="stylesheet" href="styles.css?v=say3" />
 </head>
 <body>
   <div class="app">
@@ -55,12 +55,36 @@
     <!-- Language picker dropdown (shared) -->
     <div class="lang-menu hidden" id="langMenu" role="listbox" hidden></div>
 
+    <section class="voice-bar" aria-label="Voice controls">
+      <button type="button" class="voice-btn voice-mic" id="micBtnMain" aria-label="Microphone — speak to type">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="9" y="2" width="6" height="12" rx="3"/>
+          <path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/>
+        </svg>
+        <span class="voice-btn-text">
+          <strong>Mic</strong>
+          <small>Speak to type</small>
+        </span>
+      </button>
+      <button type="button" class="voice-btn voice-speak" id="speakBtnMain" aria-label="Speak — hear translation aloud">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+          <path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/>
+        </svg>
+        <span class="voice-btn-text">
+          <strong>Speak</strong>
+          <small>Hear translation</small>
+        </span>
+      </button>
+    </section>
+    <p class="voice-hint hidden" id="voiceHint" role="status" aria-live="polite"></p>
+
     <main class="main">
       <section class="card input-card">
         <div class="card-toolbar">
           <span class="card-label" id="inputLabel">English</span>
           <div class="toolbar-actions">
-            <button type="button" class="icon-btn" id="micBtn" aria-label="Voice input" title="Voice → text">
+            <button type="button" class="icon-btn voice-icon" id="micBtn" aria-label="Microphone — speak to type" title="Mic — speak to type">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <rect x="9" y="2" width="6" height="12" rx="3"/>
                 <path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/>
@@ -105,7 +129,7 @@
         <div class="card-toolbar">
           <span class="card-label" id="outputLabel">Egyptian Arabic · مصري</span>
           <div class="toolbar-actions">
-            <button type="button" class="icon-btn" id="speakBtn" aria-label="Speak translation" title="Text → voice">
+            <button type="button" class="icon-btn voice-icon" id="speakBtn" aria-label="Speak — hear translation aloud" title="Speak — hear translation">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
                 <path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/>
@@ -149,6 +173,6 @@
 
   <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="app.js?v=say2"></script>
+  <script src="app.js?v=say3"></script>
 </body>
 </html>
