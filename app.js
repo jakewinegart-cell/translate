@@ -586,7 +586,7 @@
 
   function showPronounceState(message) {
     if (!els.pronounceNote || !message) return;
-    els.pronounceNote.classList.remove("ok", "warn", "pending", "error");
+    els.pronounceNote.classList.remove("ok", "warn", "pending", "error", "google");
     els.pronounceNote.classList.add(message.level || "pending");
     if (els.pronounceBadge) els.pronounceBadge.textContent = message.badge || "";
     if (els.pronounceText) els.pronounceText.textContent = message.text || "";
@@ -614,20 +614,42 @@
     if (els.hearSlowBtn) els.hearSlowBtn.setAttribute("aria-label", "Play slowly: " + text);
     const policy = PRONOUNCE();
     if (!policy) return;
-    if (typeof window.speechSynthesis === "undefined") {
-      showPronounceState(policy.disclosure({ speechUnavailable: true, voicesKnown: true }));
-      return;
-    }
     refreshVoices();
     const voicesKnown = voicesChecked || voicesCache.length > 0;
-    const pick = policy.pickEgyptianVoice(voicesCache);
+    if (!voicesKnown && typeof window.speechSynthesis !== "undefined") {
+      showPronounceState(policy.disclosure({ voicesKnown: false }));
+      return;
+    }
+    const plan = policy.choosePronunciation({
+      voices: typeof window.speechSynthesis === "undefined" ? [] : voicesCache,
+      voicesKnown: true,
+      online: isOnline(),
+    });
     showPronounceState(
       policy.disclosure({
-        voicesKnown: voicesKnown,
-        pick: pick,
-        playedWithoutVoice: !!(replayHint && voicesKnown && pick.voice),
+        voicesKnown: true,
+        engine: plan.engine,
+        pick: plan.pick,
+        online: isOnline(),
+        playedWithoutVoice: !!(replayHint && plan.engine === "egyptian-device" && plan.pick && plan.pick.voice),
       })
     );
+  }
+
+  function isOnline() {
+    if (typeof window !== "undefined" && typeof window.__SAY_ONLINE === "boolean") return window.__SAY_ONLINE;
+    try {
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return false;
+    } catch (_) {
+      /* ignore */
+    }
+    return true;
+  }
+
+  function isSlowRate(rate) {
+    const policy = PRONOUNCE();
+    const slow = policy ? policy.RATE_SLOW : 0.65;
+    return typeof rate === "number" && rate <= slow + 0.02;
   }
 
   function updateCharCount() {
@@ -888,9 +910,30 @@
     activeSpeakButton = on ? button || null : null;
   }
 
+  let googleAudio = null;
+
+  function stopGoogleAudio() {
+    const audio = googleAudio;
+    if (!audio) return;
+    audio.onended = null;
+    audio.onerror = null;
+    try {
+      audio.pause();
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      audio.removeAttribute("src");
+    } catch (_) {
+      /* ignore */
+    }
+    audio.src = "";
+  }
+
   function stopSpeaking() {
     speakGen += 1;
     replayHint = false;
+    stopGoogleAudio();
     try {
       if (typeof window.speechSynthesis !== "undefined") window.speechSynthesis.cancel();
     } catch (_) {
@@ -1274,74 +1317,29 @@
     return slow ? "Speaking slowly…" : "Speaking…";
   }
 
-  /**
-   * Play Egyptian Arabic text. Audio starts only from a tap.
-   * Does not label a generic Arabic voice as Egyptian — see pronounce.js.
-   */
-  function speakEgyptian(text, opts) {
-    opts = opts || {};
-    const policy = PRONOUNCE();
-    const rate = typeof opts.rate === "number" ? opts.rate : policy ? policy.RATE_NORMAL : 0.92;
-    const origin = opts.origin || "hear";
-    const button = opts.button || null;
-    const phrase = String(text || "").trim();
+  function markSpeaking(origin, button) {
+    setSpeakSpeakingUI(true, origin, button);
+    const statusLabel = els.speakStatus && els.speakStatus.querySelector("[data-speak-label]");
+    if (statusLabel) statusLabel.textContent = speakLabelFor(origin, button);
+  }
 
-    unlockSpeech();
-
-    if (!phrase) {
-      showToast("Nothing to pronounce");
+  function speakWithDevice(phrase, voice, rate, gen, origin, button, onFail) {
+    if (typeof window.speechSynthesis === "undefined" || typeof window.SpeechSynthesisUtterance === "undefined") {
+      if (onFail) onFail();
       return;
     }
-    if (!policy || typeof window.speechSynthesis === "undefined") {
-      if (policy) revealDialect(policy.disclosure({ speechUnavailable: true, voicesKnown: true }));
-      else showToast("Speech synthesis unavailable in this browser");
-      return;
-    }
-
-    const gen = ++speakGen;
-    try {
-      window.speechSynthesis.cancel();
-    } catch (_) {
-      /* ignore */
-    }
-    clearSpeakResume();
-
-    refreshVoices();
-    const voicesKnown = voicesChecked || voicesCache.length > 0;
-    const pick = policy.pickEgyptianVoice(voicesCache);
-    replayHint = false;
-
-    if (voicesKnown && !pick.voice) {
-      revealDialect(policy.disclosure({ voicesKnown: true, pick: pick }));
-      finishSpeakingUI();
-      return;
-    }
-
-    replayHint = !pick.voice;
-    revealDialect(
-      policy.disclosure({
-        voicesKnown: voicesKnown,
-        pick: pick,
-        playedWithoutVoice: false,
-      })
-    );
-
     const u = new SpeechSynthesisUtterance(phrase);
-    u.lang = (pick.voice && pick.voice.lang) || "ar-EG";
-    if (pick.voice) {
+    u.lang = (voice && voice.lang) || "ar-EG";
+    if (voice) {
       try {
-        u.voice = pick.voice;
+        u.voice = voice;
       } catch (_) {
-        // A stale voice object cannot be assigned. lang still steers the engine.
+        /* stale voice list — lang is still set */
       }
     }
     u.rate = rate;
     u.pitch = 1;
-
-    setSpeakSpeakingUI(true, origin, button);
-    const statusLabel = els.speakStatus && els.speakStatus.querySelector("[data-speak-label]");
-    if (statusLabel) statusLabel.textContent = speakLabelFor(origin, button);
-
+    markSpeaking(origin, button);
     u.onend = () => {
       if (gen !== speakGen) return;
       finishSpeakingUI();
@@ -1349,28 +1347,29 @@
     u.onerror = (ev) => {
       if (gen !== speakGen) return;
       const code = (ev && ev.error) || "";
-      if (code === "canceled" || code === "interrupted") {
+      if (code === "canceled" || code === "interrupted") return;
+      clearSpeakResume();
+      if (onFail) onFail();
+      else {
         finishSpeakingUI();
-        return;
+        const policy = PRONOUNCE();
+        if (policy) {
+          revealDialect(
+            policy.disclosure({
+              playbackError:
+                code === "not-allowed"
+                  ? "This browser blocked audio. Tap Hear again."
+                  : "Couldn’t play audio" + (code ? " (" + code + ")" : "") + ". Tap Hear to try again.",
+              voicesKnown: true,
+            })
+          );
+        }
       }
-      finishSpeakingUI();
-      const friendly =
-        code === "not-allowed"
-          ? "This browser blocked audio. Tap Hear again."
-          : "Couldn’t play audio" + (code ? " (" + code + ")" : "") + ". Tap Hear to try again.";
-      revealDialect(policy.disclosure({ playbackError: friendly, voicesKnown: true }));
     };
-
     try {
       window.speechSynthesis.speak(u);
     } catch (_) {
-      finishSpeakingUI();
-      revealDialect(
-        policy.disclosure({
-          playbackError: "Playback couldn’t start. Tap Hear to try again.",
-          voicesKnown: true,
-        })
-      );
+      if (onFail) onFail();
       return;
     }
     kickSpeechSynthesis();
@@ -1390,33 +1389,179 @@
       if (!seenSpeaking && ticks >= 12) finishSpeakingUI();
       if (ticks > 80) clearSpeakResume();
     }, 250);
+  }
 
-    if (!voicesKnown) {
-      waitForVoices(1800).then(() => {
+  function ensureGoogleAudio() {
+    if (!googleAudio) googleAudio = new Audio();
+    googleAudio.referrerPolicy = "no-referrer";
+    googleAudio.preload = "none";
+    googleAudio.playbackRate = 1;
+    try {
+      googleAudio.preservesPitch = true;
+    } catch (_) {
+      /* ignore */
+    }
+    return googleAudio;
+  }
+
+  function playGoogleArabic(phrase, slow, gen, origin, button) {
+    const policy = PRONOUNCE();
+    clearSpeakResume();
+    const chunks = policy.chunkForGoogleTts(phrase);
+    if (!chunks.length) {
+      finishSpeakingUI();
+      return;
+    }
+    const audio = ensureGoogleAudio();
+    let index = 0;
+    let settled = false;
+    function fail() {
+      if (settled || gen !== speakGen) return;
+      settled = true;
+      audio.onended = null;
+      audio.onerror = null;
+      try {
+        audio.pause();
+      } catch (_) {
+        /* ignore */
+      }
+      fallbackAfterGoogle(phrase, slow, gen, origin, button);
+    }
+    function step() {
+      if (gen !== speakGen) return;
+      if (index >= chunks.length) {
+        settled = true;
+        finishSpeakingUI();
+        return;
+      }
+      const url = policy.googleTtsUrl(chunks[index], slow);
+      index += 1;
+      audio.onended = () => step();
+      audio.onerror = () => fail();
+      audio.src = url;
+      let playResult;
+      try {
+        playResult = audio.play();
+      } catch (_) {
+        fail();
+        return;
+      }
+      if (playResult && typeof playResult.catch === "function") playResult.catch(() => fail());
+    }
+    markSpeaking(origin, button);
+    step();
+  }
+
+  function fallbackAfterGoogle(phrase, slow, gen, origin, button) {
+    if (gen !== speakGen) return;
+    const policy = PRONOUNCE();
+    refreshVoices();
+    const other = policy.pickTier(voicesCache, "arabic-other");
+    const rate = slow ? policy.RATE_SLOW : policy.RATE_NORMAL;
+    if (other.voice && typeof window.speechSynthesis !== "undefined") {
+      revealDialect(policy.disclosure({ voicesKnown: true, engine: "arabic-device", pick: other }));
+      speakWithDevice(phrase, other.voice, rate, gen, origin, button, null);
+      return;
+    }
+    finishSpeakingUI();
+    revealDialect(policy.disclosure({ voicesKnown: true, engine: "none", online: isOnline() }));
+  }
+
+  /**
+   * Play Egyptian Arabic text. Audio starts only from a tap.
+   * Device ar-EG, then Google Arabic (online), then other device Arabic.
+   */
+  function speakEgyptian(text, opts) {
+    opts = opts || {};
+    const policy = PRONOUNCE();
+    const rate = typeof opts.rate === "number" ? opts.rate : policy ? policy.RATE_NORMAL : 0.92;
+    const origin = opts.origin || "hear";
+    const button = opts.button || null;
+    const phrase = String(text || "").trim();
+    const slow = isSlowRate(rate);
+
+    unlockSpeech();
+
+    if (!phrase) {
+      showToast("Nothing to pronounce");
+      return;
+    }
+    if (!policy) {
+      showToast("Pronunciation isn’t available");
+      return;
+    }
+
+    const gen = ++speakGen;
+    stopGoogleAudio();
+    try {
+      if (typeof window.speechSynthesis !== "undefined") window.speechSynthesis.cancel();
+    } catch (_) {
+      /* ignore */
+    }
+    clearSpeakResume();
+
+    refreshVoices();
+    const voicesKnown = voicesChecked || voicesCache.length > 0;
+    const plan = policy.choosePronunciation({
+      voices: voicesCache,
+      voicesKnown: voicesKnown,
+      online: isOnline(),
+    });
+    replayHint = !voicesKnown;
+
+    if (plan.engine === "egyptian-device" || plan.engine === "arabic-device") {
+      revealDialect(
+        policy.disclosure({
+          voicesKnown: true,
+          engine: plan.engine,
+          pick: plan.pick,
+          playedWithoutVoice: false,
+        })
+      );
+      speakWithDevice(phrase, plan.pick.voice, rate, gen, origin, button, () => {
         if (gen !== speakGen) return;
-        voicesChecked = true;
-        const latePick = policy.pickEgyptianVoice(voicesCache);
-        if (!latePick.voice) {
-          replayHint = false;
-          revealDialect(policy.disclosure({ voicesKnown: true, pick: latePick }));
-          speakGen += 1;
-          try {
-            window.speechSynthesis.cancel();
-          } catch (_) {
-            /* ignore */
-          }
-          finishSpeakingUI();
+        if (plan.engine === "egyptian-device" && isOnline()) {
+          revealDialect(policy.disclosure({ voicesKnown: true, engine: "google" }));
+          playGoogleArabic(phrase, slow, gen, origin, button);
           return;
         }
-        revealDialect(
-          policy.disclosure({
-            voicesKnown: true,
-            pick: latePick,
-            playedWithoutVoice: !pick.voice,
-          })
-        );
+        const other = plan.fallback && plan.fallback.voice ? plan.fallback : policy.pickTier(voicesCache, "arabic-other");
+        if (plan.engine === "egyptian-device" && other.voice) {
+          revealDialect(policy.disclosure({ voicesKnown: true, engine: "arabic-device", pick: other }));
+          speakWithDevice(phrase, other.voice, rate, gen, origin, button, null);
+          return;
+        }
+        finishSpeakingUI();
+        revealDialect(policy.disclosure({ voicesKnown: true, engine: "none", online: isOnline() }));
       });
+      return;
     }
+
+    if (plan.engine === "google") {
+      revealDialect(policy.disclosure({ voicesKnown: true, engine: "google" }));
+      playGoogleArabic(phrase, slow, gen, origin, button);
+      if (!voicesKnown) {
+        waitForVoices(1800).then(() => {
+          if (gen !== speakGen) return;
+          voicesChecked = true;
+          const late = policy.pickTier(voicesCache, "egyptian-locale");
+          if (!late.voice) return;
+          replayHint = true;
+          revealDialect(
+            policy.disclosure({
+              voicesKnown: true,
+              engine: "egyptian-device",
+              pick: late,
+              playedWithoutVoice: true,
+            })
+          );
+        });
+      }
+      return;
+    }
+
+    finishSpeakingUI();
+    revealDialect(policy.disclosure({ voicesKnown: true, engine: "none", online: isOnline() }));
   }
 
   function speakOutput() {

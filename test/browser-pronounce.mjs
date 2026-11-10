@@ -135,6 +135,46 @@ function installSpeech(page, voices) {
     }
     TestUtterance.prototype = OrigUtterance.prototype;
     window.SpeechSynthesisUtterance = TestUtterance;
+    window.__googlePlays = [];
+    window.__googleFail = false;
+    window.__googleHold = false;
+    window.__SAY_ONLINE = true;
+    function FakeAudio() {
+      this.referrerPolicy = "";
+      this.playbackRate = 1;
+      this.preservesPitch = true;
+      this.preload = "none";
+      this.src = "";
+      this.onended = null;
+      this.onerror = null;
+    }
+    FakeAudio.prototype.play = function () {
+      window.__googlePlays.push({
+        src: this.src,
+        referrerPolicy: this.referrerPolicy,
+        playbackRate: this.playbackRate,
+        preservesPitch: this.preservesPitch,
+      });
+      const self = this;
+      if (window.__googleFail) {
+        setTimeout(() => {
+          if (typeof self.onerror === "function") self.onerror();
+        }, 0);
+        return Promise.reject(new Error("google-fail"));
+      }
+      if (!window.__googleHold) {
+        setTimeout(() => {
+          if (typeof self.onended === "function") self.onended();
+        }, 20);
+      }
+      return Promise.resolve();
+    };
+    FakeAudio.prototype.pause = function () {};
+    FakeAudio.prototype.load = function () {};
+    FakeAudio.prototype.removeAttribute = function (name) {
+      if (name === "src") this.src = "";
+    };
+    window.Audio = FakeAudio;
     try {
       localStorage.clear();
     } catch (_) {
@@ -230,6 +270,8 @@ try {
     assert.equal(spoken[0].voice && spoken[0].voice.lang, "ar-EG");
     assert.equal(spoken[0].voice.name, "Microsoft Hoda");
     assert.ok(Math.abs(spoken[0].rate - 0.92) < 0.001);
+    const googleDuringEgypt = await page.evaluate(() => window.__googlePlays.length);
+    assert.equal(googleDuringEgypt, 0, "an ar-EG voice is used instead of Google");
     assert.equal(await page.locator("#hearBtn").getAttribute("aria-pressed"), "true");
     assert.equal(await page.locator("#speakStatus").isVisible(), true);
     await page.evaluate(() => {
@@ -266,47 +308,85 @@ try {
     note("PASS egypt-locale normal, slow, no autoplay, history hear");
   }
 
-  // Fallback: Saudi voice must be labeled not Egyptian, and it still plays.
+  // Online with only a Saudi voice: Google plays, and it is not labeled Egyptian.
+  {
+    const { page, errors } = await openApp(browser, [samantha, maged], { width: 360, height: 780 });
+    await translateHello(page);
+    assert.equal(await page.locator("#pronounceBadge").textContent(), "Google Arabic (online)");
+    const text = await page.locator("#pronounceText").textContent();
+    assert.match(text, /standard Arabic pronunciation, not Egyptian/);
+    assert.doesNotMatch(text, /Install an Arabic/);
+    assert.equal(await page.locator("#pronounceNote").evaluate((el) => el.classList.contains("error")), false);
+    await page.evaluate(() => {
+      window.__googleHold = true;
+    });
+    await page.click("#hearBtn");
+    await page.waitForFunction(() => window.__googlePlays.length >= 1);
+    const plays = await page.evaluate(() => window.__googlePlays);
+    assert.match(plays[0].src, /translate\.google\.com\/translate_tts/);
+    assert.match(plays[0].src, /tl=ar/);
+    assert.equal(plays[0].referrerPolicy, "no-referrer");
+    assert.doesNotMatch(plays[0].src, /ttsspeed/);
+    assert.equal(plays[0].playbackRate, 1);
+    const spoken = await page.evaluate(() => window.__speech.spoken.filter((s) => /[\u0600-\u06FF]/.test(s.text)));
+    assert.equal(spoken.length, 0, "Google playback must not also speak with Maged");
+    assert.match(await page.locator("[data-speak-label]").textContent(), /Speaking/);
+    await shot(page, "google_playback_360.png");
+    await page.evaluate(() => {
+      window.__googleHold = false;
+    });
+    await page.click("#hearSlowBtn");
+    await page.waitForFunction(() => window.__googlePlays.length >= 2);
+    const slowPlay = await page.evaluate(() => window.__googlePlays[window.__googlePlays.length - 1]);
+    assert.match(slowPlay.src, /ttsspeed=0\.1/);
+    assert.equal(slowPlay.playbackRate, 1);
+    assert.deepEqual(errors, []);
+    await page.close();
+    note("PASS Google Arabic online is preferred over ar-SA and slow uses ttsspeed");
+  }
+
+  // If Google fails, the other device Arabic voice plays and is not called Egyptian.
   {
     const { page, errors } = await openApp(browser, [samantha, maged]);
     await translateHello(page);
-    assert.equal(await page.locator("#pronounceBadge").textContent(), "Not Egyptian");
-    const text = await page.locator("#pronounceText").textContent();
-    assert.match(text, /Maged/);
-    assert.match(text, /Saudi Arabia/);
-    assert.match(text, /not Egyptian Arabic/);
-    assert.match(text, /Install an Arabic \(Egypt\) voice/);
-    assert.doesNotMatch(text, /Closest voice on this device/);
-    assert.doesNotMatch(text, /Egypt-locale/);
+    await page.evaluate(() => {
+      window.__googleFail = true;
+    });
     await page.click("#hearBtn");
     await page.waitForFunction(() => window.__speech.spoken.some((s) => s.text.includes("أهلاً")));
     const spoken = await page.evaluate(() => window.__speech.spoken.filter((s) => /[\u0600-\u06FF]/.test(s.text)));
-    assert.equal(spoken[0].voice.lang, "ar-SA");
     assert.equal(spoken[0].voice.name, "Maged");
+    assert.equal(spoken[0].voice.lang, "ar-SA");
+    assert.equal(await page.locator("#pronounceBadge").textContent(), "Not Egyptian");
+    const text = await page.locator("#pronounceText").textContent();
+    assert.match(text, /Saudi Arabia/);
+    assert.match(text, /not Egyptian Arabic/);
+    assert.doesNotMatch(text, /Google Arabic \(online\) is standard/);
     await shot(page, "pronounce_not_egyptian_fallback.png");
     assert.deepEqual(errors, []);
     await page.close();
-    note("PASS ar-SA Maged plays as not-Egyptian fallback");
+    note("PASS Google failure falls back to Maged without calling it Egyptian");
   }
 
-  // No Arabic voice: do not speak the phrase with English.
+  // No device Arabic voice: Google plays, English TTS is not used. Offline shows an error.
   {
-    const { page, errors } = await openApp(browser, [samantha]);
+    const { page, errors } = await openApp(browser, [samantha], { width: 360, height: 780 });
     await translateHello(page);
-    assert.equal(await page.locator("#pronounceBadge").textContent(), "No Arabic voice");
-    assert.match(await page.locator("#pronounceText").textContent(), /non-Arabic voice is not used/);
+    assert.equal(await page.locator("#pronounceBadge").textContent(), "Google Arabic (online)");
+    await page.evaluate(() => {
+      window.__googleFail = true;
+      window.__SAY_ONLINE = false;
+    });
     await page.click("#hearBtn");
-    await page.waitForTimeout(80);
+    await page.waitForFunction(() => document.querySelector("#pronounceBadge").textContent === "Offline");
     const spoken = await page.evaluate(() => window.__speech.spoken.filter((s) => /[\u0600-\u06FF]/.test(s.text)));
     assert.equal(spoken.length, 0);
-    await page.click("#hearSlowBtn");
-    await page.waitForTimeout(80);
-    const spokenAfter = await page.evaluate(() => window.__speech.spoken.filter((s) => /[\u0600-\u06FF]/.test(s.text)));
-    assert.equal(spokenAfter.length, 0);
-    await shot(page, "pronounce_no_arabic_voice.png");
+    assert.match(await page.locator("#pronounceText").textContent(), /offline/i);
+    assert.equal(await page.locator("#hearBtn").getAttribute("aria-pressed"), "false");
+    await shot(page, "google_offline_360.png");
     assert.deepEqual(errors, []);
     await page.close();
-    note("PASS no Arabic voice does not play English TTS");
+    note("PASS offline with no Arabic voice shows an error and does not speak English");
   }
 
   // Voices arrive after the tap. No automatic second playback.
@@ -315,21 +395,23 @@ try {
     await translateHello(page);
     assert.equal(await page.locator("#pronounceBadge").textContent(), "Checking voices");
     await page.click("#hearBtn");
-    await page.waitForFunction(() => window.__speech.spoken.some((s) => s.text.includes("أهلاً")));
-    const first = await page.evaluate(() => window.__speech.spoken.filter((s) => /[\u0600-\u06FF]/.test(s.text)));
-    assert.equal(first.length, 1);
-    assert.equal(first[0].voice, null);
-    assert.equal(first[0].lang, "ar-EG");
+    await page.waitForFunction(() => window.__googlePlays.length >= 1);
+    const earlySpeech = await page.evaluate(() => window.__speech.spoken.filter((s) => /[\u0600-\u06FF]/.test(s.text)));
+    assert.equal(earlySpeech.length, 0, "unknown voices use Google instead of a blank device voice");
     await page.evaluate((list) => window.__setVoices(list), [hoda]);
     await page.waitForFunction(() => document.querySelector("#pronounceText").textContent.includes("Tap Hear again"));
     await page.waitForTimeout(200);
-    const after = await page.evaluate(() => window.__speech.spoken.filter((s) => /[\u0600-\u06FF]/.test(s.text)));
-    assert.equal(after.length, 1, "voices arriving must not replay audio");
+    const still = await page.evaluate(() => ({
+      speech: window.__speech.spoken.filter((s) => /[\u0600-\u06FF]/.test(s.text)).length,
+      google: window.__googlePlays.length,
+    }));
+    assert.equal(still.speech, 0, "a late ar-EG voice must not auto-play");
+    assert.equal(still.google, 1, "a late ar-EG voice must not replay Google");
     assert.match(await page.locator("#pronounceBadge").textContent(), /Arabic \(Egypt\) voice/);
     await page.click("#hearBtn");
-    await page.waitForFunction(() => window.__speech.spoken.filter((s) => /[\u0600-\u06FF]/.test(s.text)).length >= 2);
+    await page.waitForFunction(() => window.__speech.spoken.some((s) => s.voice && s.voice.name === "Microsoft Hoda"));
     const second = await page.evaluate(() => window.__speech.spoken.filter((s) => /[\u0600-\u06FF]/.test(s.text)));
-    assert.equal(second[1].voice.name, "Microsoft Hoda");
+    assert.equal(second[0].voice.name, "Microsoft Hoda");
     assert.deepEqual(errors, []);
     await page.close();
     note("PASS async voice load does not auto-replay; next tap uses ar-EG");
@@ -339,10 +421,13 @@ try {
   {
     const { page, errors } = await openApp(browser, [hoda]);
     await translateHello(page);
-    await page.evaluate(() => window.__failNext("not-allowed"));
+    await page.evaluate(() => {
+      window.__failNext("not-allowed");
+      window.__googleFail = true;
+    });
     await page.click("#hearBtn");
     await page.waitForFunction(() => document.querySelector("#pronounceBadge").textContent === "Playback failed");
-    assert.match(await page.locator("#pronounceText").textContent(), /blocked audio/);
+    assert.match(await page.locator("#pronounceText").textContent(), /no Arabic voice|connection/i);
     assert.equal(await page.locator("#hearBtn").getAttribute("aria-pressed"), "false");
     assert.equal(await page.locator("#speakStatus").isVisible(), false);
     assert.deepEqual(errors, []);
@@ -467,7 +552,9 @@ try {
     if (!info.available) {
       assert.match(info.text, /speech synthesis/i);
     } else if (!arabic.length) {
-      assert.equal(info.badge, "No Arabic voice");
+      assert.equal(info.badge, "Google Arabic (online)");
+      assert.match(info.text, /not Egyptian/);
+      assert.doesNotMatch(info.text, /does not call a cloud/);
     } else {
       assert.ok(info.badge === "Not Egyptian" || info.badge === "Arabic (Egypt) voice" || info.badge === "Checking voices");
       if (info.badge === "Not Egyptian") assert.match(info.text, /not Egyptian Arabic/);
@@ -477,6 +564,127 @@ try {
     assert.deepEqual(errors, []);
     await page.close();
     note("PASS real device disclosure matches installed voices");
+  }
+
+  // 360px: an installed ar-EG voice is still preferred over Google.
+  {
+    const { page, errors } = await openApp(browser, [samantha, maged, hoda], { width: 360, height: 780 });
+    await translateHello(page);
+    assert.equal(await page.locator("#pronounceBadge").textContent(), "Arabic (Egypt) voice");
+    await page.evaluate(() => window.__holdSpeech(true));
+    await page.click("#hearBtn");
+    await page.waitForFunction(() => window.__speech.spoken.some((s) => s.voice && s.voice.lang === "ar-EG"));
+    assert.equal(await page.evaluate(() => window.__googlePlays.length), 0);
+    await assertNoXOverflow(page);
+    await shot(page, "egypt_voice_preferred_360.png");
+    assert.deepEqual(errors, []);
+    await page.close();
+    note("PASS 360px prefers ar-EG over Google");
+  }
+
+  // Long text is split into Google requests of at most 200 characters, in order.
+  {
+    const { page, errors } = await openApp(browser, [samantha]);
+    await translateHello(page);
+    const long = ("كلمة ".repeat(80)).trim();
+    await page.evaluate((value) => {
+      const out = document.getElementById("outputText");
+      out.classList.add("has-result");
+      out.textContent = value;
+    }, long);
+    await page.click("#hearBtn");
+    await page.waitForFunction(() => window.__googlePlays.length >= 2);
+    const parts = await page.evaluate(() =>
+      window.__googlePlays.map((play) => {
+        const q = new URL(play.src).searchParams.get("q") || "";
+        return { q, referrerPolicy: play.referrerPolicy };
+      })
+    );
+    assert.ok(parts.length >= 2);
+    parts.forEach((part) => {
+      assert.ok(part.q.length <= 200, "chunk " + part.q.length);
+      assert.equal(part.referrerPolicy, "no-referrer");
+      assert.match(part.q, /كلمة/);
+    });
+    assert.equal(parts.map((part) => part.q).join(" "), long);
+    assert.deepEqual(errors, []);
+    await page.close();
+    note("PASS Google text is chunked under 200 characters");
+  }
+
+  // Real Hear tap: the app's Audio element loads Google TTS with no Referer.
+  {
+    const page = await browser.newPage({ viewport: { width: 360, height: 780 } });
+    const errors = [];
+    page.on("pageerror", (err) => errors.push(String(err)));
+    const hits = [];
+    page.on("request", (req) => {
+      if (req.url().includes("translate_tts")) {
+        hits.push({
+          url: req.url(),
+          referer: req.headers()["referer"] || req.headers()["referrer"] || "",
+        });
+      }
+    });
+    page.on("response", (res) => {
+      if (res.url().includes("translate_tts")) {
+        const hit = hits.find((item) => item.url === res.url() && !item.status);
+        if (hit) {
+          hit.status = res.status();
+          hit.type = res.headers()["content-type"] || "";
+        }
+      }
+    });
+    await page.addInitScript(() => {
+      const Orig = window.Audio;
+      window.Audio = function SayAudio() {
+        const audio = new Orig();
+        const origPlay = audio.play.bind(audio);
+        audio.play = function () {
+          window.__sayAudio = audio;
+          return origPlay();
+        };
+        return audio;
+      };
+      try {
+        localStorage.clear();
+      } catch (_) {
+        /* ignore */
+      }
+    });
+    await page.goto(base + "/index.html", { waitUntil: "domcontentloaded" });
+    await translateHello(page);
+    await page.waitForFunction(() => document.querySelector("#pronounceBadge").textContent === "Google Arabic (online)");
+    await page.click("#hearBtn");
+    await page.waitForFunction(() => window.__sayAudio && window.__sayAudio.readyState >= 2 && window.__sayAudio.duration > 0, null, {
+      timeout: 15000,
+    });
+    const media = await page.evaluate(() => {
+      const a = window.__sayAudio;
+      return { duration: a.duration, readyState: a.readyState, referrerPolicy: a.referrerPolicy, paused: a.paused };
+    });
+    note(
+      "AUDIO element duration=" +
+        media.duration +
+        " readyState=" +
+        media.readyState +
+        " paused=" +
+        media.paused +
+        " referrerPolicy=" +
+        media.referrerPolicy
+    );
+    note("AUDIO requests " + JSON.stringify(hits.map((hit) => ({ status: hit.status, type: hit.type, referer: hit.referer || "(none)" }))));
+    assert.equal(media.referrerPolicy, "no-referrer");
+    assert.equal(media.paused, false);
+    assert.ok(media.duration > 0.4, "duration " + media.duration);
+    assert.ok(hits.some((hit) => hit.status === 200 && /audio/.test(hit.type || "")));
+    assert.ok(hits.every((hit) => !hit.referer));
+    assert.notEqual(await page.locator("#pronounceBadge").textContent(), "Playback failed");
+    assert.equal(await page.locator("#pronounceNote").evaluate((el) => el.classList.contains("error")), false);
+    await shot(page, "google_playback_real_360.png");
+    assert.deepEqual(errors, []);
+    await page.close();
+    note("PASS real Google TTS audio plays from Hear");
   }
 } finally {
   await browser.close();
