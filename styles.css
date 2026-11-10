@@ -657,6 +657,12 @@ body {
   color: #fde68a;
 }
 
+.pronounce-note.google {
+  background: rgba(96, 165, 250, 0.1);
+  border: 1px solid rgba(147, 197, 253, 0.45);
+  color: #dbeafe;
+}
+
 .pronounce-note.pending {
   background: rgba(148, 163, 184, 0.08);
   border: 1px solid rgba(148, 163, 184, 0.22);
