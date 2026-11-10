@@ -2,6 +2,7 @@
  * Say — translation UI (Egyptian Arabic · مصري first)
  * Real: MyMemory text API (arz), Web Speech STT/TTS, Tesseract.js OCR
  * Fast path: curated DEMO dictionary for common phrases
+ * Egyptian pronunciation: pronounce.js (device voices only, dialect labels)
  */
 (function () {
   "use strict";
@@ -267,6 +268,12 @@
     speakStatus: $("speakStatus"),
     voiceHint: $("voiceHint"),
     demoNote: $("demoNote"),
+    pronounceBox: $("pronounceBox"),
+    pronounceNote: $("pronounceNote"),
+    pronounceBadge: $("pronounceBadge"),
+    pronounceText: $("pronounceText"),
+    hearBtn: $("hearBtn"),
+    hearSlowBtn: $("hearSlowBtn"),
     historyList: $("historyList"),
     clearHistoryBtn: $("clearHistoryBtn"),
     toast: $("toast"),
@@ -278,8 +285,16 @@
   let tesseractLoading = null;
   let voicesCache = [];
   let voicesReady = false;
+  let voicesChecked = false;
   let speechUnlocked = false;
   let speakResumeTimer = null;
+  let speakGen = 0;
+  let activeSpeakButton = null;
+  let replayHint = false;
+
+  const PRONOUNCE = function () {
+    return window.SayPronounce;
+  };
 
   const TRANSLATE_BTN_HTML =
     '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 8l6 6M5 8l6-6M5 8h10a4 4 0 0 1 0 8h-2"/><path d="M13 16l6 6M19 16l-6 6"/></svg> Translate';
@@ -415,6 +430,7 @@
     els.outputLabel.textContent = langDisplay(state.target);
     applyScriptClass(els.inputText, state.source);
     applyScriptClass(els.outputText, state.target);
+    syncPronounceBox();
   }
 
   function swapLanguages() {
@@ -519,6 +535,7 @@
    * @param {null|{kind:string,detail?:string}} note
    */
   function setOutput(text, note) {
+    stopSpeaking();
     els.outputText.classList.add("has-result");
     els.outputText.textContent = text;
     applyScriptClass(els.outputText, state.target);
@@ -538,14 +555,79 @@
     } else {
       els.demoNote.classList.add("hidden");
     }
+    syncPronounceBox();
   }
 
   function clearOutput() {
+    stopSpeaking();
     els.outputText.classList.remove("has-result");
     els.outputText.innerHTML = '<span class="placeholder">Translation appears here</span>';
     els.demoNote.classList.add("hidden");
     els.speakStatus.classList.add("hidden");
     els.speakBtn.classList.remove("speaking");
+    syncPronounceBox();
+  }
+
+  function currentResultText() {
+    if (!els.outputText.classList.contains("has-result")) return "";
+    return (els.outputText.textContent || "").trim();
+  }
+
+  function hasArabicScript(s) {
+    return /[\u0600-\u06FF]/.test(s || "");
+  }
+
+  function egyptianPhraseFromHistory(item) {
+    if (!item) return "";
+    if (item.target === "ar-EG" && hasArabicScript(item.tgt)) return item.tgt;
+    if (item.source === "ar-EG" && hasArabicScript(item.src)) return item.src;
+    return "";
+  }
+
+  function showPronounceState(message) {
+    if (!els.pronounceNote || !message) return;
+    els.pronounceNote.classList.remove("ok", "warn", "pending", "error");
+    els.pronounceNote.classList.add(message.level || "pending");
+    if (els.pronounceBadge) els.pronounceBadge.textContent = message.badge || "";
+    if (els.pronounceText) els.pronounceText.textContent = message.text || "";
+  }
+
+  function revealDialect(message) {
+    showPronounceState(message);
+    if (!message) return;
+    const noteVisible = els.pronounceBox && !els.pronounceBox.hidden;
+    if (!noteVisible) showToast(message.short || message.badge, 4600);
+  }
+
+  function syncPronounceBox() {
+    if (!els.pronounceBox) return;
+    const text = currentResultText();
+    const show = state.target === "ar-EG" && !!text;
+    if (!show) {
+      els.pronounceBox.hidden = true;
+      els.pronounceBox.classList.add("hidden");
+      return;
+    }
+    els.pronounceBox.hidden = false;
+    els.pronounceBox.classList.remove("hidden");
+    if (els.hearBtn) els.hearBtn.setAttribute("aria-label", "Play pronunciation: " + text);
+    if (els.hearSlowBtn) els.hearSlowBtn.setAttribute("aria-label", "Play slowly: " + text);
+    const policy = PRONOUNCE();
+    if (!policy) return;
+    if (typeof window.speechSynthesis === "undefined") {
+      showPronounceState(policy.disclosure({ speechUnavailable: true, voicesKnown: true }));
+      return;
+    }
+    refreshVoices();
+    const voicesKnown = voicesChecked || voicesCache.length > 0;
+    const pick = policy.pickEgyptianVoice(voicesCache);
+    showPronounceState(
+      policy.disclosure({
+        voicesKnown: voicesKnown,
+        pick: pick,
+        playedWithoutVoice: !!(replayHint && voicesKnown && pick.voice),
+      })
+    );
   }
 
   function updateCharCount() {
@@ -676,7 +758,9 @@
       return;
     }
     state.history.forEach((item) => {
+      const phrase = egyptianPhraseFromHistory(item);
       const li = document.createElement("li");
+      if (phrase) li.className = "history-row";
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "history-item";
@@ -716,8 +800,36 @@
         updateCharCount();
       });
       li.appendChild(btn);
+      if (phrase) {
+        const actions = document.createElement("div");
+        actions.className = "history-hear";
+        actions.appendChild(makeHearButton(phrase, "normal"));
+        actions.appendChild(makeHearButton(phrase, "slow"));
+        li.appendChild(actions);
+      }
       els.historyList.appendChild(li);
     });
+  }
+
+  function makeHearButton(text, rateName) {
+    const btn = document.createElement("button");
+    const slow = rateName === "slow";
+    btn.type = "button";
+    btn.className = "hear-btn hear-compact" + (slow ? " hear-slow" : "");
+    btn.setAttribute("aria-pressed", "false");
+    btn.setAttribute(
+      "aria-label",
+      (slow ? "Play slowly: " : "Play pronunciation: ") + text
+    );
+    if (slow) {
+      btn.title = "Replay slower, about two-thirds speed. Some browsers limit how slow speech can go.";
+    }
+    btn.dataset.hearText = text;
+    btn.dataset.hearRate = slow ? "slow" : "normal";
+    const label = document.createElement("span");
+    label.textContent = slow ? "Slow" : "Hear";
+    btn.appendChild(label);
+    return btn;
   }
 
   function getSpeechRecognition() {
@@ -747,12 +859,44 @@
     else els.micStatus.classList.add("hidden");
   }
 
-  function setSpeakSpeakingUI(on) {
-    const method = on ? "add" : "remove";
-    els.speakBtn.classList[method]("speaking");
-    if (els.speakBtnMain) els.speakBtnMain.classList[method]("speaking");
-    if (on) els.speakStatus.classList.remove("hidden");
-    else els.speakStatus.classList.add("hidden");
+  function setPressed(el, on) {
+    if (!el) return;
+    el.classList.toggle("speaking", !!on);
+    el.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
+  function setSpeakSpeakingUI(on, origin, button) {
+    const mainOn = !!on && origin !== "slow" && origin !== "history";
+    const hearOn = !!on && (origin === "hear" || origin === "speak");
+    const slowOn = !!on && origin === "slow";
+    setPressed(els.speakBtn, mainOn);
+    setPressed(els.speakBtnMain, mainOn);
+    setPressed(els.hearBtn, hearOn);
+    setPressed(els.hearSlowBtn, slowOn);
+    if (els.speakStatus) {
+      const label = els.speakStatus.querySelector("[data-speak-label]");
+      if (label) label.textContent = slowOn || (button && button.classList.contains("hear-slow"))
+        ? "Speaking slowly…"
+        : "Speaking…";
+      if (on) els.speakStatus.classList.remove("hidden");
+      else els.speakStatus.classList.add("hidden");
+    }
+    if (activeSpeakButton && activeSpeakButton !== button) {
+      setPressed(activeSpeakButton, false);
+    }
+    if (button) setPressed(button, !!on);
+    activeSpeakButton = on ? button || null : null;
+  }
+
+  function stopSpeaking() {
+    speakGen += 1;
+    replayHint = false;
+    try {
+      if (typeof window.speechSynthesis !== "undefined") window.speechSynthesis.cancel();
+    } catch (_) {
+      /* ignore */
+    }
+    finishSpeakingUI();
   }
 
   function updateVoiceCapabilityUI() {
@@ -891,12 +1035,73 @@
     }
   }
 
+  function loadTesseract() {
+    if (window.Tesseract) return Promise.resolve(window.Tesseract);
+    if (tesseractLoading) return tesseractLoading;
+    tesseractLoading = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js";
+      s.async = true;
+      s.onload = () => {
+        if (window.Tesseract) resolve(window.Tesseract);
+        else reject(new Error("Tesseract failed to load"));
+      };
+      s.onerror = () => reject(new Error("Could not load Tesseract.js (CDN)"));
+      document.head.appendChild(s);
+    });
+    return tesseractLoading;
+  }
+
+  function startCamera() {
+    els.imageInput.click();
+  }
+
+  async function onImagePicked(e) {
+    const file = e.target.files && e.target.files[0];
+    els.imageInput.value = "";
+    if (!file) return;
+
+    const name = file.name || "photo.jpg";
+    const ocrCode = OCR_LANG[state.source] || "eng";
+    els.ocrStatus.classList.remove("hidden");
+    els.ocrStatus.textContent = "OCR · loading engine for " + ocrCode + "…";
+
+    try {
+      const Tesseract = await loadTesseract();
+      els.ocrStatus.textContent = "OCR · reading " + name + " (" + ocrCode + ")…";
+      const result = await Tesseract.recognize(file, ocrCode, {
+        logger: (m) => {
+          if (m.status === "recognizing text" && typeof m.progress === "number") {
+            els.ocrStatus.textContent =
+              "OCR · " + Math.round(m.progress * 100) + "% · " + name;
+          }
+        },
+      });
+      const text = (result && result.data && result.data.text ? result.data.text : "").trim();
+      if (!text) {
+        els.ocrStatus.textContent = "OCR · no text found in " + name;
+        showToast("No text detected in image");
+      } else {
+        els.inputText.value = text;
+        updateCharCount();
+        applyScriptClass(els.inputText, state.source);
+        els.ocrStatus.textContent = "OCR · done · " + name;
+        showToast("OCR text inserted");
+      }
+    } catch (err) {
+      els.ocrStatus.textContent = "OCR failed";
+      showToast((err && err.message) || "OCR failed", 4000);
+    }
+    setTimeout(() => els.ocrStatus.classList.add("hidden"), 2800);
+  }
+
   function refreshVoices() {
     if (typeof window.speechSynthesis === "undefined") return;
     const list = window.speechSynthesis.getVoices() || [];
     if (list.length) {
       voicesCache = list;
       voicesReady = true;
+      voicesChecked = true;
     }
   }
 
@@ -910,6 +1115,7 @@
         if (settled) return;
         settled = true;
         refreshVoices();
+        voicesChecked = true;
         resolve(voicesCache);
       };
       const onChange = () => finish();
@@ -1016,17 +1222,31 @@
   }
 
   function speakUtterance(text, bcp) {
+    const gen = ++speakGen;
     const u = new SpeechSynthesisUtterance(text);
     u.lang = bcp;
     u.rate = state.target === "ja" ? 0.9 : 0.95;
     const voice = pickVoice(bcp);
     if (voice) {
-      u.voice = voice;
+      try {
+        u.voice = voice;
+      } catch (_) {
+        /* stale voice list — lang is still set */
+      }
       u.lang = voice.lang || bcp;
     }
     setSpeakSpeakingUI(true);
-    u.onend = () => finishSpeakingUI();
-    u.onerror = () => {
+    u.onend = () => {
+      if (gen !== speakGen) return;
+      finishSpeakingUI();
+    };
+    u.onerror = (ev) => {
+      if (gen !== speakGen) return;
+      const code = (ev && ev.error) || "";
+      if (code === "canceled" || code === "interrupted") {
+        finishSpeakingUI();
+        return;
+      }
       finishSpeakingUI();
       showToast("Could not speak on this device");
     };
@@ -1035,6 +1255,10 @@
     clearSpeakResume();
     let ticks = 0;
     speakResumeTimer = setInterval(() => {
+      if (gen !== speakGen) {
+        clearSpeakResume();
+        return;
+      }
       ticks += 1;
       kickSpeechSynthesis();
       if (!window.speechSynthesis.speaking && !window.speechSynthesis.pending) {
@@ -1043,6 +1267,156 @@
       if (ticks > 80) clearSpeakResume();
     }, 250);
     return voice;
+  }
+
+  function speakLabelFor(origin, button) {
+    const slow = origin === "slow" || (button && button.classList.contains("hear-slow"));
+    return slow ? "Speaking slowly…" : "Speaking…";
+  }
+
+  /**
+   * Play Egyptian Arabic text. Audio starts only from a tap.
+   * Does not label a generic Arabic voice as Egyptian — see pronounce.js.
+   */
+  function speakEgyptian(text, opts) {
+    opts = opts || {};
+    const policy = PRONOUNCE();
+    const rate = typeof opts.rate === "number" ? opts.rate : policy ? policy.RATE_NORMAL : 0.92;
+    const origin = opts.origin || "hear";
+    const button = opts.button || null;
+    const phrase = String(text || "").trim();
+
+    unlockSpeech();
+
+    if (!phrase) {
+      showToast("Nothing to pronounce");
+      return;
+    }
+    if (!policy || typeof window.speechSynthesis === "undefined") {
+      if (policy) revealDialect(policy.disclosure({ speechUnavailable: true, voicesKnown: true }));
+      else showToast("Speech synthesis unavailable in this browser");
+      return;
+    }
+
+    const gen = ++speakGen;
+    try {
+      window.speechSynthesis.cancel();
+    } catch (_) {
+      /* ignore */
+    }
+    clearSpeakResume();
+
+    refreshVoices();
+    const voicesKnown = voicesChecked || voicesCache.length > 0;
+    const pick = policy.pickEgyptianVoice(voicesCache);
+    replayHint = false;
+
+    if (voicesKnown && !pick.voice) {
+      revealDialect(policy.disclosure({ voicesKnown: true, pick: pick }));
+      finishSpeakingUI();
+      return;
+    }
+
+    replayHint = !pick.voice;
+    revealDialect(
+      policy.disclosure({
+        voicesKnown: voicesKnown,
+        pick: pick,
+        playedWithoutVoice: false,
+      })
+    );
+
+    const u = new SpeechSynthesisUtterance(phrase);
+    u.lang = (pick.voice && pick.voice.lang) || "ar-EG";
+    if (pick.voice) {
+      try {
+        u.voice = pick.voice;
+      } catch (_) {
+        // A stale voice object cannot be assigned. lang still steers the engine.
+      }
+    }
+    u.rate = rate;
+    u.pitch = 1;
+
+    setSpeakSpeakingUI(true, origin, button);
+    const statusLabel = els.speakStatus && els.speakStatus.querySelector("[data-speak-label]");
+    if (statusLabel) statusLabel.textContent = speakLabelFor(origin, button);
+
+    u.onend = () => {
+      if (gen !== speakGen) return;
+      finishSpeakingUI();
+    };
+    u.onerror = (ev) => {
+      if (gen !== speakGen) return;
+      const code = (ev && ev.error) || "";
+      if (code === "canceled" || code === "interrupted") {
+        finishSpeakingUI();
+        return;
+      }
+      finishSpeakingUI();
+      const friendly =
+        code === "not-allowed"
+          ? "This browser blocked audio. Tap Hear again."
+          : "Couldn’t play audio" + (code ? " (" + code + ")" : "") + ". Tap Hear to try again.";
+      revealDialect(policy.disclosure({ playbackError: friendly, voicesKnown: true }));
+    };
+
+    try {
+      window.speechSynthesis.speak(u);
+    } catch (_) {
+      finishSpeakingUI();
+      revealDialect(
+        policy.disclosure({
+          playbackError: "Playback couldn’t start. Tap Hear to try again.",
+          voicesKnown: true,
+        })
+      );
+      return;
+    }
+    kickSpeechSynthesis();
+    clearSpeakResume();
+    let ticks = 0;
+    let seenSpeaking = false;
+    speakResumeTimer = setInterval(() => {
+      if (gen !== speakGen) {
+        clearSpeakResume();
+        return;
+      }
+      ticks += 1;
+      const active = !!(window.speechSynthesis.speaking || window.speechSynthesis.pending);
+      if (active) seenSpeaking = true;
+      kickSpeechSynthesis();
+      if (seenSpeaking && !active) finishSpeakingUI();
+      if (!seenSpeaking && ticks >= 12) finishSpeakingUI();
+      if (ticks > 80) clearSpeakResume();
+    }, 250);
+
+    if (!voicesKnown) {
+      waitForVoices(1800).then(() => {
+        if (gen !== speakGen) return;
+        voicesChecked = true;
+        const latePick = policy.pickEgyptianVoice(voicesCache);
+        if (!latePick.voice) {
+          replayHint = false;
+          revealDialect(policy.disclosure({ voicesKnown: true, pick: latePick }));
+          speakGen += 1;
+          try {
+            window.speechSynthesis.cancel();
+          } catch (_) {
+            /* ignore */
+          }
+          finishSpeakingUI();
+          return;
+        }
+        revealDialect(
+          policy.disclosure({
+            voicesKnown: true,
+            pick: latePick,
+            playedWithoutVoice: !pick.voice,
+          })
+        );
+      });
+    }
   }
 
   function speakOutput() {
@@ -1059,28 +1433,30 @@
       return;
     }
 
-    const bcp = LANGS[state.target].tts || "en-US";
-
-    // Cancel any prior utterance, then speak inside this user gesture.
-    try {
-      window.speechSynthesis.cancel();
-      clearSpeakResume();
-    } catch (_) {
-      /* ignore */
+    if (state.target === "ar-EG") {
+      const policy = PRONOUNCE();
+      speakEgyptian(text, {
+        rate: policy ? policy.RATE_NORMAL : 0.92,
+        origin: "speak",
+        button: els.speakBtn,
+      });
+      return;
     }
 
+    const bcp = LANGS[state.target].tts || "en-US";
+
+    // Drop any in-flight Egyptian (or other) utterance before this tap's playback.
+    stopSpeaking();
     refreshVoices();
 
     const run = (voiceHint) => {
       try {
         const voice = speakUtterance(text, bcp);
-        if (!voice && (state.target === "ar-EG" || state.target === "gl" || state.target === "ja")) {
+        if (!voice && (state.target === "gl" || state.target === "ja")) {
           showToast(
             state.target === "gl"
               ? "No Galician voice — using Spanish/default if available"
-              : state.target === "ja"
-                ? "No Japanese voice found — using device default"
-                : "No ar-EG voice — using best Arabic/default voice",
+              : "No Japanese voice found — using device default",
             3500
           );
         } else if (voiceHint) {
@@ -1155,6 +1531,49 @@
     els.imageInput.addEventListener("change", onImagePicked);
     els.speakBtn.addEventListener("click", speakOutput);
     if (els.speakBtnMain) els.speakBtnMain.addEventListener("click", speakOutput);
+    if (els.hearBtn) {
+      els.hearBtn.addEventListener("click", () => {
+        const text = currentResultText();
+        if (!text) {
+          showToast("Translate something first, then tap Hear");
+          return;
+        }
+        const policy = PRONOUNCE();
+        speakEgyptian(text, {
+          rate: policy ? policy.RATE_NORMAL : 0.92,
+          origin: "hear",
+          button: els.hearBtn,
+        });
+      });
+    }
+    if (els.hearSlowBtn) {
+      els.hearSlowBtn.addEventListener("click", () => {
+        const text = currentResultText();
+        if (!text) {
+          showToast("Translate something first, then tap Slow");
+          return;
+        }
+        const policy = PRONOUNCE();
+        speakEgyptian(text, {
+          rate: policy ? policy.RATE_SLOW : 0.65,
+          origin: "slow",
+          button: els.hearSlowBtn,
+        });
+      });
+    }
+    els.historyList.addEventListener("click", (e) => {
+      const hear = e.target.closest("[data-hear-text]");
+      if (!hear || !els.historyList.contains(hear)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const policy = PRONOUNCE();
+      const slow = hear.dataset.hearRate === "slow";
+      speakEgyptian(hear.dataset.hearText || "", {
+        rate: slow ? (policy ? policy.RATE_SLOW : 0.65) : policy ? policy.RATE_NORMAL : 0.92,
+        origin: "history",
+        button: hear,
+      });
+    });
     els.copyBtn.addEventListener("click", copyOutput);
     els.clearBtn.addEventListener("click", () => {
       els.inputText.value = "";
@@ -1202,12 +1621,21 @@
     });
     if (typeof window.speechSynthesis !== "undefined") {
       refreshVoices();
+      const onVoices = () => {
+        refreshVoices();
+        voicesChecked = true;
+        if (state.target === "ar-EG" && currentResultText()) syncPronounceBox();
+      };
       try {
-        window.speechSynthesis.addEventListener("voiceschanged", refreshVoices);
+        window.speechSynthesis.addEventListener("voiceschanged", onVoices);
       } catch (_) {
-        window.speechSynthesis.onvoiceschanged = refreshVoices;
+        window.speechSynthesis.onvoiceschanged = onVoices;
       }
-      waitForVoices(2500);
+      waitForVoices(2500).then(() => {
+        if (state.target === "ar-EG" && currentResultText()) syncPronounceBox();
+      });
+    } else if (els.hearBtn) {
+      voicesChecked = true;
     }
     updateVoiceCapabilityUI();
   }
